@@ -36,6 +36,10 @@ account/rateLimits/read
   - 下灯：已完成，绿色
 - 支持随 Codex 启动自动启动，随 Codex 退出自动退出。
 
+## 预览
+
+![Touch Bar 显示效果](Assets/touchbar-screenshot.png)
+
 ## Touch Bar 常驻方案
 
 项目使用私有 `NSTouchBar` system modal selector：
