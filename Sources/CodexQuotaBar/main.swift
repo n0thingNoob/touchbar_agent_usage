@@ -5,7 +5,7 @@ import TouchBarPrivateSupport
 private let codexBinaryPath = "/Applications/Codex.app/Contents/Resources/codex"
 private let codexTemplateIconPath = "/Applications/Codex.app/Contents/Resources/codexTemplate@2x.png"
 private let automaticRefreshInterval: TimeInterval = 5 * 60
-private let taskStatusRefreshInterval: TimeInterval = 10
+private let taskStatusRefreshInterval: TimeInterval = 2
 
 struct RateLimit: Equatable {
     enum Kind: String {
