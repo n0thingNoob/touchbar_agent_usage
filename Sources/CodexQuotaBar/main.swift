@@ -5,6 +5,7 @@ import TouchBarPrivateSupport
 private let codexBinaryPath = "/Applications/Codex.app/Contents/Resources/codex"
 private let codexTemplateIconPath = "/Applications/Codex.app/Contents/Resources/codexTemplate@2x.png"
 private let automaticRefreshInterval: TimeInterval = 5 * 60
+private let taskStatusRefreshInterval: TimeInterval = 10
 
 struct RateLimit: Equatable {
     enum Kind: String {
@@ -26,6 +27,34 @@ struct RateLimitSnapshot: Equatable {
     let fiveHour: RateLimit?
     let weekly: RateLimit?
     let fetchedAt: Date
+}
+
+struct TaskActivitySnapshot: Equatable {
+    enum State: Equatable {
+        case idle
+        case running
+        case completed
+        case unknown
+    }
+
+    let state: State
+    let activeCount: Int
+    let updatedAt: Date
+
+    static let idle = TaskActivitySnapshot(state: .idle, activeCount: 0, updatedAt: Date())
+
+    var displayText: String {
+        switch state {
+        case .idle:
+            return "无任务"
+        case .running:
+            return activeCount > 1 ? "执行中 x\(activeCount)" : "执行中"
+        case .completed:
+            return "已完成"
+        case .unknown:
+            return "--"
+        }
+    }
 }
 
 enum RateLimitError: Error, LocalizedError {
@@ -180,6 +209,128 @@ final class CodexRateLimitsClient {
         }
 
         return .success(snapshot)
+    }
+}
+
+final class CodexTaskStatusClient {
+    struct Observation {
+        let activeThreadIds: Set<String>
+    }
+
+    func fetch(timeout: TimeInterval = 10, completion: @escaping (Result<Observation, Error>) -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            guard FileManager.default.isExecutableFile(atPath: codexBinaryPath) else {
+                completion(.failure(RateLimitError.codexMissing))
+                return
+            }
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: codexBinaryPath)
+            process.arguments = ["app-server", "--listen", "stdio://"]
+
+            let input = Pipe()
+            let output = Pipe()
+            let errorOutput = Pipe()
+            process.standardInput = input
+            process.standardOutput = output
+            process.standardError = errorOutput
+
+            let state = LockedResponseState()
+            output.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty else { return }
+                state.append(data)
+            }
+            errorOutput.fileHandleForReading.readabilityHandler = { _ in }
+
+            do {
+                try process.run()
+            } catch {
+                completion(.failure(RateLimitError.launchFailed(error.localizedDescription)))
+                return
+            }
+
+            do {
+                try self.write([
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": [
+                        "clientInfo": [
+                            "name": "CodexQuotaBar",
+                            "version": "0.1.0"
+                        ]
+                    ]
+                ], to: input)
+                try self.write([
+                    "jsonrpc": "2.0",
+                    "method": "initialized",
+                    "params": [:]
+                ], to: input)
+                try self.write([
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "thread/list",
+                    "params": [
+                        "limit": 20,
+                        "sortKey": "recency_at",
+                        "sortDirection": "desc",
+                        "archived": false,
+                        "useStateDbOnly": true
+                    ]
+                ], to: input)
+            } catch {
+                process.terminate()
+                completion(.failure(error))
+                return
+            }
+
+            let deadline = Date().addingTimeInterval(timeout)
+            var result: Result<Observation, Error>?
+            while Date() < deadline {
+                if let response = state.response(id: 2) {
+                    result = Self.decodeThreadListResponse(response)
+                    break
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+
+            output.fileHandleForReading.readabilityHandler = nil
+            errorOutput.fileHandleForReading.readabilityHandler = nil
+            if process.isRunning {
+                process.terminate()
+            }
+
+            completion(result ?? .failure(RateLimitError.timedOut))
+        }
+    }
+
+    private func write(_ object: [String: Any], to pipe: Pipe) throws {
+        let data = try JSONSerialization.data(withJSONObject: object, options: [])
+        pipe.fileHandleForWriting.write(data)
+        pipe.fileHandleForWriting.write(Data([0x0A]))
+    }
+
+    private static func decodeThreadListResponse(_ response: [String: Any]) -> Result<Observation, Error> {
+        if let error = response["error"] as? [String: Any] {
+            let message = error["message"] as? String ?? "Codex app-server 返回错误"
+            return .failure(RateLimitError.serverError(message))
+        }
+
+        guard let result = response["result"] as? [String: Any],
+              let data = result["data"] as? [[String: Any]] else {
+            return .failure(RateLimitError.invalidResponse)
+        }
+
+        let activeIds = data.compactMap { thread -> String? in
+            guard let status = thread["status"] as? [String: Any],
+                  (status["type"] as? String) == "active" else {
+                return nil
+            }
+            return thread["id"] as? String
+        }
+
+        return .success(Observation(activeThreadIds: Set(activeIds)))
     }
 }
 
@@ -395,10 +546,15 @@ private final class RateLimitExtractor {
 
 final class QuotaStore {
     private let client = CodexRateLimitsClient()
+    private let taskClient = CodexTaskStatusClient()
     private var refreshTimer: Timer?
+    private var taskStatusTimer: Timer?
+    private var activeThreadIds = Set<String>()
+    private var lastCompletedAt: Date?
     private(set) var snapshot: RateLimitSnapshot?
     private(set) var isRefreshing = false
     private(set) var lastError: String?
+    private(set) var taskStatus: TaskActivitySnapshot = .idle
     var onChange: (() -> Void)?
 
     func startAutomaticRefresh(interval: TimeInterval = automaticRefreshInterval) {
@@ -406,12 +562,19 @@ final class QuotaStore {
         refreshTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.refresh()
         }
+        taskStatusTimer?.invalidate()
+        taskStatusTimer = Timer.scheduledTimer(withTimeInterval: taskStatusRefreshInterval, repeats: true) { [weak self] _ in
+            self?.refreshTaskStatus()
+        }
         refresh()
+        refreshTaskStatus()
     }
 
     func stopAutomaticRefresh() {
         refreshTimer?.invalidate()
         refreshTimer = nil
+        taskStatusTimer?.invalidate()
+        taskStatusTimer = nil
     }
 
     func refresh() {
@@ -434,6 +597,43 @@ final class QuotaStore {
                 self.onChange?()
             }
         }
+    }
+
+    func refreshTaskStatus() {
+        taskClient.fetch { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success(let observation):
+                    self.applyTaskObservation(observation)
+                case .failure:
+                    self.taskStatus = TaskActivitySnapshot(state: .unknown, activeCount: 0, updatedAt: Date())
+                    self.onChange?()
+                }
+            }
+        }
+    }
+
+    private func applyTaskObservation(_ observation: CodexTaskStatusClient.Observation) {
+        let now = Date()
+        if !observation.activeThreadIds.isEmpty {
+            activeThreadIds = observation.activeThreadIds
+            lastCompletedAt = nil
+            taskStatus = TaskActivitySnapshot(
+                state: .running,
+                activeCount: observation.activeThreadIds.count,
+                updatedAt: now
+            )
+        } else if !activeThreadIds.isEmpty {
+            activeThreadIds.removeAll()
+            lastCompletedAt = now
+            taskStatus = TaskActivitySnapshot(state: .completed, activeCount: 0, updatedAt: now)
+        } else if let lastCompletedAt, now.timeIntervalSince(lastCompletedAt) < 90 {
+            taskStatus = TaskActivitySnapshot(state: .completed, activeCount: 0, updatedAt: now)
+        } else {
+            taskStatus = TaskActivitySnapshot(state: .idle, activeCount: 0, updatedAt: now)
+        }
+        onChange?()
     }
 }
 
@@ -613,6 +813,7 @@ final class TouchBarQuotaView: NSView {
     private let logoButton = NSButton()
     private let fiveHourRow = TouchBarQuotaRowView(title: "5小时")
     private let weeklyRow = TouchBarQuotaRowView(title: "周限额")
+    private let taskStatusLabel = NSTextField(labelWithString: "任务：--")
     var onLogoTapped: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
@@ -624,9 +825,11 @@ final class TouchBarQuotaView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func update(snapshot: RateLimitSnapshot?, isRefreshing: Bool, error: String?) {
+    func update(snapshot: RateLimitSnapshot?, isRefreshing: Bool, error: String?, taskStatus: TaskActivitySnapshot) {
         fiveHourRow.update(with: snapshot?.fiveHour, isRefreshing: isRefreshing)
         weeklyRow.update(with: snapshot?.weekly, isRefreshing: isRefreshing)
+        taskStatusLabel.stringValue = "任务：\(taskStatus.displayText)"
+        taskStatusLabel.textColor = color(for: taskStatus.state)
     }
 
     private func setup() {
@@ -646,10 +849,14 @@ final class TouchBarQuotaView: NSView {
         rows.alignment = .leading
         rows.spacing = 1
 
-        let stack = NSStackView(views: [logoButton, rows])
+        taskStatusLabel.font = .systemFont(ofSize: 10, weight: .semibold)
+        taskStatusLabel.alignment = .right
+        taskStatusLabel.lineBreakMode = .byTruncatingTail
+
+        let stack = NSStackView(views: [logoButton, rows, taskStatusLabel])
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 8
+        stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
@@ -658,6 +865,7 @@ final class TouchBarQuotaView: NSView {
             heightAnchor.constraint(equalToConstant: 30),
             logoButton.widthAnchor.constraint(equalToConstant: 26),
             logoButton.heightAnchor.constraint(equalToConstant: 26),
+            taskStatusLabel.widthAnchor.constraint(equalToConstant: 96),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor)
@@ -666,6 +874,19 @@ final class TouchBarQuotaView: NSView {
 
     @objc private func logoTapped() {
         onLogoTapped?()
+    }
+
+    private func color(for state: TaskActivitySnapshot.State) -> NSColor {
+        switch state {
+        case .running:
+            return .systemGreen
+        case .completed:
+            return .systemBlue
+        case .idle:
+            return .secondaryLabelColor
+        case .unknown:
+            return .systemOrange
+        }
     }
 }
 
@@ -1030,11 +1251,21 @@ final class ControlStripController: NSObject {
             trayButton.title = "Codex --"
         }
 
-        modalView.update(snapshot: store.snapshot, isRefreshing: store.isRefreshing, error: store.lastError)
+        modalView.update(
+            snapshot: store.snapshot,
+            isRefreshing: store.isRefreshing,
+            error: store.lastError,
+            taskStatus: store.taskStatus
+        )
     }
 
     @objc func presentModal() {
-        modalView.update(snapshot: store.snapshot, isRefreshing: store.isRefreshing, error: store.lastError)
+        modalView.update(
+            snapshot: store.snapshot,
+            isRefreshing: store.isRefreshing,
+            error: store.lastError,
+            taskStatus: store.taskStatus
+        )
         _ = TBPresentSystemModalTouchBar(modalView, Self.identifier)
     }
 
