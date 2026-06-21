@@ -30,10 +30,10 @@ account/rateLimits/read
 - 左侧显示 Codex logo。
 - 每 5 分钟自动刷新一次 usage 数据。
 - Touch Bar 上点击 Codex logo，会显示 `刷新`、`打开浮窗`、`返回` 操作按钮。
-- 每 2 秒轮询 Codex 线程状态，在 Touch Bar 上显示任务状态：
-  - `执行中`
-  - `已完成`
-  - `无任务`
+- 每 2 秒轮询 Codex 线程状态，在 Touch Bar 上用三颗灯显示任务状态：
+  - 左灯：无任务
+  - 中灯：执行中，轻微呼吸亮
+  - 右灯：已完成
 - 支持随 Codex 启动自动启动，随 Codex 退出自动退出。
 
 ## Touch Bar 常驻方案

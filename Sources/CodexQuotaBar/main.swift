@@ -739,7 +739,7 @@ final class TouchBarQuotaView: NSView {
     private let logoButton = NSButton()
     private let fiveHourRow = TouchBarQuotaRowView(title: "5小时")
     private let weeklyRow = TouchBarQuotaRowView(title: "周限额")
-    private let taskStatusLabel = NSTextField(labelWithString: "任务：--")
+    private let taskLightsView = TaskStatusLightsView()
     var onLogoTapped: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
@@ -754,8 +754,7 @@ final class TouchBarQuotaView: NSView {
     func update(snapshot: RateLimitSnapshot?, isRefreshing: Bool, error: String?, taskStatus: TaskActivitySnapshot) {
         fiveHourRow.update(with: snapshot?.fiveHour, isRefreshing: isRefreshing)
         weeklyRow.update(with: snapshot?.weekly, isRefreshing: isRefreshing)
-        taskStatusLabel.stringValue = "任务：\(taskStatus.displayText)"
-        taskStatusLabel.textColor = color(for: taskStatus.state)
+        taskLightsView.update(state: taskStatus.state)
     }
 
     private func setup() {
@@ -775,11 +774,7 @@ final class TouchBarQuotaView: NSView {
         rows.alignment = .leading
         rows.spacing = 1
 
-        taskStatusLabel.font = .systemFont(ofSize: 10, weight: .semibold)
-        taskStatusLabel.alignment = .right
-        taskStatusLabel.lineBreakMode = .byTruncatingTail
-
-        let stack = NSStackView(views: [logoButton, rows, taskStatusLabel])
+        let stack = NSStackView(views: [logoButton, rows, taskLightsView])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 10
@@ -791,7 +786,8 @@ final class TouchBarQuotaView: NSView {
             heightAnchor.constraint(equalToConstant: 30),
             logoButton.widthAnchor.constraint(equalToConstant: 26),
             logoButton.heightAnchor.constraint(equalToConstant: 26),
-            taskStatusLabel.widthAnchor.constraint(equalToConstant: 96),
+            taskLightsView.widthAnchor.constraint(equalToConstant: 44),
+            taskLightsView.heightAnchor.constraint(equalToConstant: 18),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor)
@@ -801,18 +797,109 @@ final class TouchBarQuotaView: NSView {
     @objc private func logoTapped() {
         onLogoTapped?()
     }
+}
 
-    private func color(for state: TaskActivitySnapshot.State) -> NSColor {
-        switch state {
-        case .running:
-            return .systemGreen
-        case .completed:
-            return .systemBlue
-        case .idle:
-            return .secondaryLabelColor
-        case .unknown:
-            return .systemOrange
+final class TaskStatusLightsView: NSView {
+    private let idleLight = CALayer()
+    private let runningLight = CALayer()
+    private let completedLight = CALayer()
+    private var currentState: TaskActivitySnapshot.State = .unknown
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 44, height: 18)
+    }
+
+    override func layout() {
+        super.layout()
+        layoutLights()
+    }
+
+    func update(state: TaskActivitySnapshot.State) {
+        guard state != currentState else {
+            return
         }
+        currentState = state
+        applyState()
+    }
+
+    private func setup() {
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+
+        [idleLight, runningLight, completedLight].forEach { light in
+            light.masksToBounds = true
+            light.opacity = 1
+            layer?.addSublayer(light)
+        }
+
+        applyState()
+    }
+
+    private func layoutLights() {
+        let diameter: CGFloat = 8
+        let gap: CGFloat = 6
+        let totalWidth = (diameter * 3) + (gap * 2)
+        let startX = max(0, (bounds.width - totalWidth) / 2)
+        let y = max(0, (bounds.height - diameter) / 2)
+
+        [idleLight, runningLight, completedLight].enumerated().forEach { index, light in
+            light.frame = CGRect(
+                x: startX + CGFloat(index) * (diameter + gap),
+                y: y,
+                width: diameter,
+                height: diameter
+            )
+            light.cornerRadius = diameter / 2
+        }
+    }
+
+    private func applyState() {
+        stopBreathing()
+
+        let dimColor = NSColor.separatorColor.withAlphaComponent(0.28).cgColor
+        [idleLight, runningLight, completedLight].forEach { light in
+            light.backgroundColor = dimColor
+            light.opacity = 1
+        }
+
+        switch currentState {
+        case .idle:
+            idleLight.backgroundColor = NSColor.systemGray.withAlphaComponent(0.95).cgColor
+        case .running:
+            runningLight.backgroundColor = NSColor.systemGreen.cgColor
+            startBreathing()
+        case .completed:
+            completedLight.backgroundColor = NSColor.systemBlue.cgColor
+        case .unknown:
+            [idleLight, runningLight, completedLight].forEach { light in
+                light.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.16).cgColor
+            }
+        }
+    }
+
+    private func startBreathing() {
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = 0.35
+        animation.toValue = 1.0
+        animation.duration = 1.2
+        animation.autoreverses = true
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        runningLight.add(animation, forKey: "breathing")
+    }
+
+    private func stopBreathing() {
+        runningLight.removeAnimation(forKey: "breathing")
+        runningLight.opacity = 1
     }
 }
 
