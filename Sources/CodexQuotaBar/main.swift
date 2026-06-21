@@ -786,8 +786,8 @@ final class TouchBarQuotaView: NSView {
             heightAnchor.constraint(equalToConstant: 30),
             logoButton.widthAnchor.constraint(equalToConstant: 26),
             logoButton.heightAnchor.constraint(equalToConstant: 26),
-            taskLightsView.widthAnchor.constraint(equalToConstant: 44),
-            taskLightsView.heightAnchor.constraint(equalToConstant: 18),
+            taskLightsView.widthAnchor.constraint(equalToConstant: 22),
+            taskLightsView.heightAnchor.constraint(equalToConstant: 26),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor)
@@ -815,7 +815,7 @@ final class TaskStatusLightsView: NSView {
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: 44, height: 18)
+        NSSize(width: 22, height: 26)
     }
 
     override func layout() {
@@ -845,16 +845,16 @@ final class TaskStatusLightsView: NSView {
     }
 
     private func layoutLights() {
-        let diameter: CGFloat = 8
-        let gap: CGFloat = 6
-        let totalWidth = (diameter * 3) + (gap * 2)
-        let startX = max(0, (bounds.width - totalWidth) / 2)
-        let y = max(0, (bounds.height - diameter) / 2)
+        let diameter: CGFloat = 6
+        let gap: CGFloat = 3
+        let totalHeight = (diameter * 3) + (gap * 2)
+        let x = max(0, (bounds.width - diameter) / 2)
+        let startY = max(0, (bounds.height - totalHeight) / 2)
 
         [idleLight, runningLight, completedLight].enumerated().forEach { index, light in
             light.frame = CGRect(
-                x: startX + CGFloat(index) * (diameter + gap),
-                y: y,
+                x: x,
+                y: startY + CGFloat(2 - index) * (diameter + gap),
                 width: diameter,
                 height: diameter
             )
@@ -873,12 +873,12 @@ final class TaskStatusLightsView: NSView {
 
         switch currentState {
         case .idle:
-            idleLight.backgroundColor = NSColor.systemGray.withAlphaComponent(0.95).cgColor
+            idleLight.backgroundColor = NSColor.systemRed.cgColor
         case .running:
-            runningLight.backgroundColor = NSColor.systemGreen.cgColor
+            runningLight.backgroundColor = NSColor.systemYellow.cgColor
             startBreathing()
         case .completed:
-            completedLight.backgroundColor = NSColor.systemBlue.cgColor
+            completedLight.backgroundColor = NSColor.systemGreen.cgColor
         case .unknown:
             [idleLight, runningLight, completedLight].forEach { light in
                 light.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.16).cgColor
