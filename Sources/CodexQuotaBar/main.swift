@@ -838,6 +838,7 @@ final class TaskStatusLightsView: NSView {
         [idleLight, runningLight, completedLight].forEach { light in
             light.masksToBounds = true
             light.opacity = 1
+            light.borderWidth = 0.75
             layer?.addSublayer(light)
         }
 
@@ -865,23 +866,29 @@ final class TaskStatusLightsView: NSView {
     private func applyState() {
         stopBreathing()
 
-        let dimColor = NSColor.separatorColor.withAlphaComponent(0.28).cgColor
+        let dimColor = NSColor(calibratedWhite: 0.45, alpha: 0.85).cgColor
+        let dimBorderColor = NSColor(calibratedWhite: 0.75, alpha: 0.65).cgColor
         [idleLight, runningLight, completedLight].forEach { light in
             light.backgroundColor = dimColor
+            light.borderColor = dimBorderColor
             light.opacity = 1
         }
 
         switch currentState {
         case .idle:
             idleLight.backgroundColor = NSColor.systemRed.cgColor
+            idleLight.borderColor = NSColor.systemRed.cgColor
         case .running:
             runningLight.backgroundColor = NSColor.systemYellow.cgColor
+            runningLight.borderColor = NSColor.systemYellow.cgColor
             startBreathing()
         case .completed:
             completedLight.backgroundColor = NSColor.systemGreen.cgColor
+            completedLight.borderColor = NSColor.systemGreen.cgColor
         case .unknown:
             [idleLight, runningLight, completedLight].forEach { light in
-                light.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.16).cgColor
+                light.backgroundColor = NSColor(calibratedWhite: 0.32, alpha: 0.75).cgColor
+                light.borderColor = NSColor(calibratedWhite: 0.58, alpha: 0.55).cgColor
             }
         }
     }
