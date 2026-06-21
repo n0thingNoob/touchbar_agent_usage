@@ -28,6 +28,8 @@ account/rateLimits/read
 - 剩余额度使用 `100 - usedPercent` 计算。
 - 刷新时保留旧数据，新数据回来后再替换，避免 Touch Bar 空白。
 - 左侧显示 Codex logo。
+- 每 5 分钟自动刷新一次 usage 数据。
+- Touch Bar 上点击 Codex logo，会显示 `刷新`、`打开浮窗`、`返回` 操作按钮。
 - 支持随 Codex 启动自动启动，随 Codex 退出自动退出。
 
 ## Touch Bar 常驻方案
