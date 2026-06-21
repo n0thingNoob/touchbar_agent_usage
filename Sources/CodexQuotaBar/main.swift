@@ -217,120 +217,46 @@ final class CodexTaskStatusClient {
         let activeThreadIds: Set<String>
     }
 
-    func fetch(timeout: TimeInterval = 10, completion: @escaping (Result<Observation, Error>) -> Void) {
+    func fetch(completion: @escaping (Result<Observation, Error>) -> Void) {
         DispatchQueue.global(qos: .utility).async {
-            guard FileManager.default.isExecutableFile(atPath: codexBinaryPath) else {
-                completion(.failure(RateLimitError.codexMissing))
+            let sessionsURL = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex/sessions", isDirectory: true)
+            guard let enumerator = FileManager.default.enumerator(
+                at: sessionsURL,
+                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                completion(.success(Observation(activeThreadIds: [])))
                 return
             }
 
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: codexBinaryPath)
-            process.arguments = ["app-server", "--listen", "stdio://"]
+            let now = Date()
+            let runningThreshold: TimeInterval = 8
+            var activeIds = Set<String>()
 
-            let input = Pipe()
-            let output = Pipe()
-            let errorOutput = Pipe()
-            process.standardInput = input
-            process.standardOutput = output
-            process.standardError = errorOutput
-
-            let state = LockedResponseState()
-            output.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                guard !data.isEmpty else { return }
-                state.append(data)
-            }
-            errorOutput.fileHandleForReading.readabilityHandler = { _ in }
-
-            do {
-                try process.run()
-            } catch {
-                completion(.failure(RateLimitError.launchFailed(error.localizedDescription)))
-                return
-            }
-
-            do {
-                try self.write([
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": [
-                        "clientInfo": [
-                            "name": "CodexQuotaBar",
-                            "version": "0.1.0"
-                        ]
-                    ]
-                ], to: input)
-                try self.write([
-                    "jsonrpc": "2.0",
-                    "method": "initialized",
-                    "params": [:]
-                ], to: input)
-                try self.write([
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "thread/list",
-                    "params": [
-                        "limit": 20,
-                        "sortKey": "recency_at",
-                        "sortDirection": "desc",
-                        "archived": false,
-                        "useStateDbOnly": true
-                    ]
-                ], to: input)
-            } catch {
-                process.terminate()
-                completion(.failure(error))
-                return
-            }
-
-            let deadline = Date().addingTimeInterval(timeout)
-            var result: Result<Observation, Error>?
-            while Date() < deadline {
-                if let response = state.response(id: 2) {
-                    result = Self.decodeThreadListResponse(response)
-                    break
+            for case let fileURL as URL in enumerator {
+                guard fileURL.lastPathComponent.hasPrefix("rollout-"),
+                      fileURL.pathExtension == "jsonl",
+                      let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                      values.isRegularFile == true,
+                      let modifiedAt = values.contentModificationDate,
+                      now.timeIntervalSince(modifiedAt) <= runningThreshold else {
+                    continue
                 }
-                Thread.sleep(forTimeInterval: 0.05)
+
+                activeIds.insert(Self.threadId(from: fileURL))
             }
 
-            output.fileHandleForReading.readabilityHandler = nil
-            errorOutput.fileHandleForReading.readabilityHandler = nil
-            if process.isRunning {
-                process.terminate()
-            }
-
-            completion(result ?? .failure(RateLimitError.timedOut))
+            completion(.success(Observation(activeThreadIds: activeIds)))
         }
     }
 
-    private func write(_ object: [String: Any], to pipe: Pipe) throws {
-        let data = try JSONSerialization.data(withJSONObject: object, options: [])
-        pipe.fileHandleForWriting.write(data)
-        pipe.fileHandleForWriting.write(Data([0x0A]))
-    }
-
-    private static func decodeThreadListResponse(_ response: [String: Any]) -> Result<Observation, Error> {
-        if let error = response["error"] as? [String: Any] {
-            let message = error["message"] as? String ?? "Codex app-server 返回错误"
-            return .failure(RateLimitError.serverError(message))
+    private static func threadId(from url: URL) -> String {
+        let name = url.deletingPathExtension().lastPathComponent
+        if let range = name.range(of: #"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-"#, options: .regularExpression) {
+            return String(name[range.upperBound...])
         }
-
-        guard let result = response["result"] as? [String: Any],
-              let data = result["data"] as? [[String: Any]] else {
-            return .failure(RateLimitError.invalidResponse)
-        }
-
-        let activeIds = data.compactMap { thread -> String? in
-            guard let status = thread["status"] as? [String: Any],
-                  (status["type"] as? String) == "active" else {
-                return nil
-            }
-            return thread["id"] as? String
-        }
-
-        return .success(Observation(activeThreadIds: Set(activeIds)))
+        return name
     }
 }
 
