@@ -4,6 +4,7 @@ import TouchBarPrivateSupport
 
 private let codexBinaryPath = "/Applications/Codex.app/Contents/Resources/codex"
 private let codexTemplateIconPath = "/Applications/Codex.app/Contents/Resources/codexTemplate@2x.png"
+private let automaticRefreshInterval: TimeInterval = 5 * 60
 
 struct RateLimit: Equatable {
     enum Kind: String {
@@ -394,10 +395,24 @@ private final class RateLimitExtractor {
 
 final class QuotaStore {
     private let client = CodexRateLimitsClient()
+    private var refreshTimer: Timer?
     private(set) var snapshot: RateLimitSnapshot?
     private(set) var isRefreshing = false
     private(set) var lastError: String?
     var onChange: (() -> Void)?
+
+    func startAutomaticRefresh(interval: TimeInterval = automaticRefreshInterval) {
+        refreshTimer?.invalidate()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+        refresh()
+    }
+
+    func stopAutomaticRefresh() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+    }
 
     func refresh() {
         guard !isRefreshing else { return }
@@ -595,9 +610,10 @@ final class QuotaContentView: NSView {
 }
 
 final class TouchBarQuotaView: NSView {
-    private let logoView = NSImageView()
+    private let logoButton = NSButton()
     private let fiveHourRow = TouchBarQuotaRowView(title: "5小时")
     private let weeklyRow = TouchBarQuotaRowView(title: "周限额")
+    var onLogoTapped: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -616,17 +632,21 @@ final class TouchBarQuotaView: NSView {
     private func setup() {
         if let image = NSImage(contentsOfFile: codexTemplateIconPath) {
             image.isTemplate = true
-            logoView.image = image
+            logoButton.image = image
         }
-        logoView.imageScaling = .scaleProportionallyUpOrDown
-        logoView.contentTintColor = .labelColor
+        logoButton.imageScaling = .scaleProportionallyUpOrDown
+        logoButton.contentTintColor = .labelColor
+        logoButton.bezelStyle = .texturedRounded
+        logoButton.isBordered = false
+        logoButton.target = self
+        logoButton.action = #selector(logoTapped)
 
         let rows = NSStackView(views: [fiveHourRow, weeklyRow])
         rows.orientation = .vertical
         rows.alignment = .leading
         rows.spacing = 1
 
-        let stack = NSStackView(views: [logoView, rows])
+        let stack = NSStackView(views: [logoButton, rows])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 8
@@ -636,12 +656,85 @@ final class TouchBarQuotaView: NSView {
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: 685),
             heightAnchor.constraint(equalToConstant: 30),
-            logoView.widthAnchor.constraint(equalToConstant: 22),
-            logoView.heightAnchor.constraint(equalToConstant: 22),
+            logoButton.widthAnchor.constraint(equalToConstant: 26),
+            logoButton.heightAnchor.constraint(equalToConstant: 26),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
+    }
+
+    @objc private func logoTapped() {
+        onLogoTapped?()
+    }
+}
+
+final class TouchBarActionView: NSView {
+    var onRefresh: (() -> Void)?
+    var onOpenPanel: (() -> Void)?
+    var onBack: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func setup() {
+        let logoButton = NSButton()
+        if let image = NSImage(contentsOfFile: codexTemplateIconPath) {
+            image.isTemplate = true
+            logoButton.image = image
+        }
+        logoButton.imageScaling = .scaleProportionallyUpOrDown
+        logoButton.contentTintColor = .labelColor
+        logoButton.bezelStyle = .texturedRounded
+        logoButton.isBordered = false
+        logoButton.target = self
+        logoButton.action = #selector(backTapped)
+
+        let refreshButton = NSButton(title: "刷新", target: self, action: #selector(refreshTapped))
+        refreshButton.bezelStyle = .rounded
+
+        let panelButton = NSButton(title: "打开浮窗", target: self, action: #selector(openPanelTapped))
+        panelButton.bezelStyle = .rounded
+
+        let backButton = NSButton(title: "返回", target: self, action: #selector(backTapped))
+        backButton.bezelStyle = .rounded
+
+        let stack = NSStackView(views: [logoButton, refreshButton, panelButton, backButton])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 685),
+            heightAnchor.constraint(equalToConstant: 30),
+            logoButton.widthAnchor.constraint(equalToConstant: 26),
+            logoButton.heightAnchor.constraint(equalToConstant: 26),
+            refreshButton.widthAnchor.constraint(equalToConstant: 72),
+            panelButton.widthAnchor.constraint(equalToConstant: 96),
+            backButton.widthAnchor.constraint(equalToConstant: 72),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
+    @objc private func refreshTapped() {
+        onRefresh?()
+    }
+
+    @objc private func openPanelTapped() {
+        onOpenPanel?()
+    }
+
+    @objc private func backTapped() {
+        onBack?()
     }
 }
 
@@ -774,6 +867,9 @@ final class StatusController {
     init(store: QuotaStore) {
         self.store = store
         self.controlStripController = ControlStripController(store: store)
+        self.controlStripController.onOpenPanel = { [weak self] in
+            self?.showTouchBarPanel()
+        }
         setupStatusItem()
         setupPopover()
         store.onChange = { [weak self] in
@@ -784,7 +880,7 @@ final class StatusController {
     func start() {
         controlStripController.install()
         update()
-        store.refresh()
+        store.startAutomaticRefresh()
     }
 
     private func setupStatusItem() {
@@ -872,6 +968,7 @@ final class StatusController {
     }
 
     @objc private func quit() {
+        store.stopAutomaticRefresh()
         controlStripController.remove()
         NSApp.terminate(nil)
     }
@@ -883,7 +980,9 @@ final class ControlStripController: NSObject {
     private let store: QuotaStore
     private let trayButton = NSButton(title: "Codex --", target: nil, action: nil)
     private let modalView = TouchBarQuotaView(frame: NSRect(x: 0, y: 0, width: 685, height: 30))
+    private let actionView = TouchBarActionView(frame: NSRect(x: 0, y: 0, width: 685, height: 30))
     private var installed = false
+    var onOpenPanel: (() -> Void)?
 
     init(store: QuotaStore) {
         self.store = store
@@ -897,6 +996,21 @@ final class ControlStripController: NSObject {
         trayButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 86).isActive = true
         trayButton.heightAnchor.constraint(equalToConstant: 30).isActive = true
 
+        modalView.onLogoTapped = { [weak self] in
+            self?.presentActions()
+        }
+
+        actionView.onRefresh = { [weak self] in
+            self?.store.refresh()
+            self?.presentModal()
+        }
+        actionView.onOpenPanel = { [weak self] in
+            self?.onOpenPanel?()
+            self?.presentModal()
+        }
+        actionView.onBack = { [weak self] in
+            self?.presentModal()
+        }
     }
 
     func install() {
@@ -922,6 +1036,10 @@ final class ControlStripController: NSObject {
     @objc func presentModal() {
         modalView.update(snapshot: store.snapshot, isRefreshing: store.isRefreshing, error: store.lastError)
         _ = TBPresentSystemModalTouchBar(modalView, Self.identifier)
+    }
+
+    @objc func presentActions() {
+        _ = TBPresentSystemModalTouchBar(actionView, Self.identifier)
     }
 
     func remove() {
